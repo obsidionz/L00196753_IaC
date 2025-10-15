@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../build/mvnTest1/mvnApp/src/main/java/ie/atu/MvnApps"
+		},
+		{
+			"name": "demo",
+			"path": "../build/test/demo"
+		}
+	],
+	"settings": {}
+}
