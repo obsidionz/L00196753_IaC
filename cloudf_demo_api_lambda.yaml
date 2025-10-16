@@ -1,19 +1,24 @@
+#default latest AWS template 
 AWSTemplateFormatVersion: 2010-09-09
+# stage name of the API versions eg v1 for prod or v2 testing 
 Parameters:
   StageName:
     Type: String
     Default: v1
-    Description: Name of API stage.
+    Description: Default used v1 API stage identifier
 Resources:
+# create resource ReqValidatorsSample API gateway -> REST API it will have all endpoints, methods and validators under it
   Api:
     Type: 'AWS::ApiGateway::RestApi'
     Properties:
       Name: ReqValidatorsSample
+# create resource model for json schema of requests responses as REST API
   RequestBodyModelId:
     Type: 'AWS::ApiGateway::Model'
     Properties:
       RestApiId: !Ref Api
       ContentType: application/json
+# defining PetID as integer and as Model identifier RequestBodyModelId
       Description: Request body model for Pet ID.
       Schema:
         $schema: 'http://json-schema.org/draft-04/schema#'
@@ -21,11 +26,14 @@ Resources:
         properties:
             id:
               type: integer
+# create resource model defining Pet request body data structure in json 
   RequestBodyModel: 
     Type: 'AWS::ApiGateway::Model'
     Properties:
       RestApiId: !Ref Api
       ContentType: application/json
+# defining id, price, name and type as json data objects and validating constraints on the input data 
+# uses referencing feature for id object 
       Description: Request body model for Pet type, name, price, and ID.
       Schema:
         $schema: 'http://json-schema.org/draft-04/schema#'
@@ -41,6 +49,7 @@ Resources:
                 - 'https://apigateway.amazonaws.com/restapis/${Api}/models/${RequestBodyModelId}'
                 - Api: !Ref Api
                   RequestBodyModelId: !Ref RequestBodyModelId
+ # validation on object data : price inputs 25 thru 500, name is string, type is string dog OR cat OR fish
             price: 
               type: number
               minimum: 25
@@ -53,26 +62,41 @@ Resources:
                 - "dog"
                 - "cat"
                 - "fish"
+# API gateway request checking 
+# the GETValidator for the GET method encoded requests 
   GETValidator:
     Type: AWS::ApiGateway::RequestValidator
+# check that encoded REST data in HTTP GET request exist as URL parameters
+# want API gateway to check the request so we can check this request syntax is met for GET requests
     Properties:
+# parameters encoded in HTTP get 
       Name: params-only
       RestApiId: !Ref Api
+# dont check body for paramter encoding in HTTP get
       ValidateRequestBody: False
+# do check URL parameters for encoding in HTTP get 
       ValidateRequestParameters: True 
+# the POSTValidator for the POST method encoded requests 
   POSTValidator:
     Type: AWS::ApiGateway::RequestValidator
+# check that encoded REST data in HTTP POST request exist as a body encoding of the parameters
+# want API gateway to check the request so we can check this request syntax is met for POST requests 
     Properties:
+# parameters encoded in HTTP post 
       Name: body-only
       RestApiId: !Ref Api
       ValidateRequestBody: True
       ValidateRequestParameters: False
+# reference the API resource earlier ReqValidatorsSample
   ValidationResource:
     Type: 'AWS::ApiGateway::Resource'
     Properties:
       RestApiId: !Ref Api
       ParentId: !GetAtt Api.RootResourceId
+ # define a Path for the URL called validation
       PathPart: 'validation'
+ # define HTTP method get call it ValidationMethodGet
+ # declare its validator identifier GETValidator
   ValidationMethodGet:
     Type: 'AWS::ApiGateway::Method'
     Properties:
@@ -80,13 +104,18 @@ Resources:
       ResourceId: !Ref ValidationResource
       HttpMethod: GET
       AuthorizationType: NONE
+# reference GETValidator 
       RequestValidatorId: !Ref GETValidator
+  # declare that paramter query is present eg true
       RequestParameters:
         method.request.querystring.q1: true
+  # then Proxy the get query to endpoint demo petstore then we will return the data to api requestor 
       Integration:
         Type: HTTP_PROXY
         IntegrationHttpMethod: GET
         Uri: http://petstore-demo-endpoint.execute-api.com/petstore/pets/
+# define HTTP method post call it ValidationMethodPost
+ # declare its validator identifier POSTValidator
   ValidationMethodPost:
     Type: 'AWS::ApiGateway::Method'
     Properties:
@@ -94,21 +123,27 @@ Resources:
       ResourceId: !Ref ValidationResource
       HttpMethod: POST
       AuthorizationType: NONE
+# reference POSTValidator
       RequestValidatorId: !Ref POSTValidator
+# reference Model of parameters encoded the body model
       RequestModels:
         application/json : !Ref RequestBodyModel 
+# then Proxy the post query to endpoint demo petstore then we will return the data to api requestor
       Integration:
         Type: HTTP_PROXY
         IntegrationHttpMethod: POST
         Uri: http://petstore-demo-endpoint.execute-api.com/petstore/pets/
+# deployment of the API gateway resource and REST API request forwarding to petstore demo API
   ApiDeployment:
     Type: 'AWS::ApiGateway::Deployment'
+# DependsOn helps resource instanciation to complete in defined sequence 
     DependsOn:
       - ValidationMethodGet
       - RequestBodyModel 
     Properties:
       RestApiId: !Ref Api
       StageName: !Sub '${StageName}'
+# Show cloudformation output the URI of the API gateway to make calls on
 Outputs:
   ApiRootUrl:
     Description: Root Url of the API
