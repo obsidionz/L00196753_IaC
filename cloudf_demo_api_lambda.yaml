@@ -141,9 +141,10 @@ Resources:
   ApiDeployment:
     Type: 'AWS::ApiGateway::Deployment'
     # DependsOn helps resource instanciation to complete in defined sequence 
+    # changing to fix github issue post validation failing after deployment
     DependsOn:
-      - ValidationMethodGet
-      - RequestBodyModel 
+      - GetValidationMethod
+      - PostValidationMethod
     Properties:
       RestApiId: !Ref Api
       StageName: !Sub '${StageName}'
