@@ -143,8 +143,8 @@ Resources:
     # DependsOn helps resource instanciation to complete in defined sequence 
     # changing to fix github issue post validation failing after deployment
     DependsOn:
-      - GetValidationMethod
-      - PostValidationMethod
+      - ValidationMethodGet
+      - ValidationMethodPost
     Properties:
       RestApiId: !Ref Api
       StageName: !Sub '${StageName}'
