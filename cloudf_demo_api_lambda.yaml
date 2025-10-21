@@ -1,4 +1,3 @@
-#default latest AWS template 
 AWSTemplateFormatVersion: 2010-09-09
 # stage name of the API versions eg v1 for prod or v2 testing 
 Parameters:
@@ -6,13 +5,160 @@ Parameters:
     Type: String
     Default: v1
     Description: Default used v1 API stage identifier
+
+  # CF Parameter Authorizer Lambda function's handler
+  LambdaHandler:
+    Type: String
+    # standard CJS handler name, index.handler,
+    # with the inline code format required by ZipFile when the file is defaulted to index.js.
+    Default: index.handler 
+    Description: The entry point for the Lambda function 
+
 Resources:
+  # -------------------------------------------------------------------
+  # Lambda authorizer resource declaration 
+  # -------------------------------------------------------------------
+  # IAM Role for the Lambda Authorizer function
+  AuthorizerLambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' # need for CloudWatch Logs
+      Tags:
+        - Key: Name
+          Value: !Sub 'AuthorizerLambdaRole-${StageName}'
+  # -------------------------------------------------------------------
+  # Lambda function resource declaration 
+  # -------------------------------------------------------------------
+  # Lambda function with inline code (Node.js)
+  AuthorizerLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub 'APIGatewayAuthorizer-${StageName}'
+      Handler: !Ref LambdaHandler
+      Role: !GetAtt AuthorizerLambdaExecutionRole.Arn
+      # Runtime node CJS standard for compatibility
+      Runtime: nodejs22.x 
+      # inline code under Zipline property attribute
+      Code:
+        ZipFile: |
+          // Includes async handler ... full token validation logic.
+          exports.handler = async (event) => {
+            
+            const methodArn = event.methodArn;
+            const EXPECTED_SECRET = "YOUR_SECRET_TOKEN"; // Bearer Token Secret change this to change Bearer Token
+
+            // make varible tokenFromHeaders then Get token from standard API Gateway field
+            // Handles case-insensitivity for 'authorization' header if present.
+            // dont want .trim() function to fail 
+            const tokenFromHeaders = event.headers?.authorization || event.headers?.Authorization || "";
+
+            // event.authorizationToken (API GW) over header access methods above
+            const fullToken = (event.authorizationToken || tokenFromHeaders || "").trim(); 
+            
+            let token = fullToken;
+            // Extract the token part, removing "Bearer " if present
+            if (fullToken.startsWith("Bearer ") || fullToken.startsWith("bearer ")) {
+                token = fullToken.substring(7).trim(); // Remove "Bearer " prefix and trim again
+            }
+            
+            // DIAGNOSTIC LOGGING
+            //console.log("Full Event Token (pre-trim, pre-bearer):", fullToken);
+            //console.log("Extracted Token for comparison:", token);
+            //console.log("Expected Token:", EXPECTED_SECRET);
+            
+            try {
+              // token validation logic
+              if (token === EXPECTED_SECRET) {
+                // ALLOW Policy
+                console.log("Authorization Succeeded.");
+                return { 
+                  principalId: "user-id",
+                  policyDocument: {
+                    Version: "2012-10-17",
+                    Statement: [
+                      {
+                        Action: "execute-api:Invoke",
+                        Effect: "Allow",
+                        Resource: methodArn,
+                      },
+                    ],
+                  },
+                  context: {
+                    userId: "authenticated-user",
+                  },
+                };
+              } else {
+                // Deny by throwing "Unauthorized" (API Gateway standard response for Deny)
+                console.error("Authorization FAILED: Token mismatch. Extracted: [%s], Expected: [%s]", token, EXPECTED_SECRET);
+                throw new Error("Unauthorized");
+              }
+            } catch (error) {
+              // Any error during execution (including the "Unauthorized" thrown above) 
+              // will result in API Gateway denying access.
+              console.error("Policy Generation/Validation Error:", error);
+              // Return a Deny policy if the error is not 'Unauthorized' (though throwing 'Unauthorized' is preferred).
+              throw new Error("Unauthorized"); 
+            }
+          };
+      Timeout: 30
+      MemorySize: 128
+      Tags:
+        - Key: Name
+          Value: !Sub 'AuthorizerLambda-${StageName}'
+  
+  # API Gateway Authorizer resource
+  ApiGatewayAuthorizer:
+    Type: 'AWS::ApiGateway::Authorizer'
+    Properties:
+      # MUST be TOKEN or REQUEST type. TOKEN is standard for header-based auth.
+      Type: TOKEN 
+      # The name of the header where the token will be passed (e.g., 'Authorization')
+      IdentitySource: method.request.header.Authorization 
+      Name: CustomLambdaAuthorizer
+      RestApiId: !Ref Api
+      AuthorizerUri: !Sub
+        # This URI format is specific for Lambda Authorizers in the current region
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations'
+        - LambdaArn: !GetAtt AuthorizerLambdaFunction.Arn
+      # Caching interval in seconds. Set to 0 to disable caching for debugging
+      AuthorizerResultTtlInSeconds: 0 
+      # Relaxing the IdentityValidationExpression
+      IdentityValidationExpression: '^Bearer .*' 
+
+  # Permission for the API Gateway to invoke the Lambda Authorizer
+  AuthorizerLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref AuthorizerLambdaFunction
+      Principal: apigateway.amazonaws.com
+      # SourceArn limits the permission to this specific REST API
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*"
+
+  # -------------------------------------------------------------------
+  # API Gateway Resources 
+  # -------------------------------------------------------------------
   # create resource ReqValidatorsSample API gateway -> REST API it will have all endpoints, methods and validators under it
   Api:
     Type: 'AWS::ApiGateway::RestApi'
     Properties:
       Name: ReqValidatorsSample
-  # create resource model for json schema of requests responses as REST API
+      # Change to REGIONAL endpoint type instead of Edge optimized to bypass CloudFront header stripping.
+      EndpointConfiguration:
+        Types:
+          - REGIONAL 
+  # -------------------------------------------------------------------
+  # Model for the Body json data this is index ID : type integer 
+  # -------------------------------------------------------------------       
+  # create resource model for Id for json schema of requests responses as REST API
   RequestBodyModelId:
     Type: 'AWS::ApiGateway::Model'
     Properties:
@@ -26,7 +172,10 @@ Resources:
         properties:
             id:
               type: integer
-  # create resource model defining Pet request body data structure in json 
+  # -------------------------------------------------------------------
+  # Model for the Body json data this is Pet type, name, price, and include ID above : type Object  
+  # -------------------------------------------------------------------       
+  # create resource model defining Pet request body data structure in json requests responses as REST API
   RequestBodyModel: 
     Type: 'AWS::ApiGateway::Model'
     Properties:
@@ -90,8 +239,8 @@ Resources:
       ValidateRequestBody: True
       # if get request has URL get style encoded parameters API gateway will throw 403 error
       ValidateRequestParameters: False
-  # reference the API resource earlier ReqValidatorsSample
-  # declare validation resources and URL path for API gateway
+      
+  # Resource for GET and POST methods (restoring to /validation)
   ValidationResource:
     Type: 'AWS::ApiGateway::Resource'
     Properties:
@@ -99,15 +248,22 @@ Resources:
       ParentId: !GetAtt Api.RootResourceId
       # define a Path for the URL called validation
       PathPart: 'validation'
-  # define HTTP method get call it ValidationMethodGet
-  # declare its validator identifier GETValidator
+
+  # -------------------------------------------------------------------
+  # Update Existing Methods to use the Authorizer
+  # -------------------------------------------------------------------
+
+  # define HTTP method get call it ValidationMethodGet - uses /validation
   ValidationMethodGet:
     Type: 'AWS::ApiGateway::Method'
     Properties:
       RestApiId: !Ref Api
+      # Point to the shared resource
       ResourceId: !Ref ValidationResource
       HttpMethod: GET
-      AuthorizationType: NONE
+      # Use the Lambda Authorizer
+      AuthorizationType: CUSTOM 
+      AuthorizerId: !Ref ApiGatewayAuthorizer
       # reference GETValidator 
       RequestValidatorId: !Ref GETValidator
       # declare that parameter query key is present called q1 it can be any value
@@ -118,18 +274,21 @@ Resources:
         Type: HTTP_PROXY
         IntegrationHttpMethod: GET
         Uri: http://petstore-demo-endpoint.execute-api.com/petstore/pets/
-  # define HTTP method post call it ValidationMethodPost
-  # declare its validator identifier POSTValidator
+
+  # define HTTP method post call it ValidationMethodPost - uses /validation
   ValidationMethodPost:
     Type: 'AWS::ApiGateway::Method'
     Properties:
       RestApiId: !Ref Api
-      ResourceId: !Ref ValidationResource
+      # Point to the shared resource
+      ResourceId: !Ref ValidationResource 
       HttpMethod: POST
-      AuthorizationType: NONE
+      # Use the Lambda Authorizer
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiGatewayAuthorizer
       # reference POSTValidator
       RequestValidatorId: !Ref POSTValidator
-      # reference Model of parameters encoded the body model
+      
       RequestModels:
         application/json : !Ref RequestBodyModel 
       # then Proxy the post query to endpoint demo petstore then we will return the data to api requestor
@@ -137,14 +296,24 @@ Resources:
         Type: HTTP_PROXY
         IntegrationHttpMethod: POST
         Uri: http://petstore-demo-endpoint.execute-api.com/petstore/pets/
+        # static Content-Type mapping to satisfy the upstream API.
+        RequestParameters:
+          integration.request.header.Content-Type: "'application/json'"
+        # Map the request body to ensure it is forwarded in the proxy integration, 
+        # as defining RequestModels can interfere with the default proxy passthrough.
+        RequestTemplates:
+          application/json: "$input.body"
+          
   # deployment of the API gateway resource and REST API request forwarding to petstore demo API
   ApiDeployment:
     Type: 'AWS::ApiGateway::Deployment'
     # DependsOn helps resource instanciation to complete in defined sequence 
-    # changing to fix github issue post validation failing after deployment
     DependsOn:
       - ValidationMethodGet
       - ValidationMethodPost
+      - ApiGatewayAuthorizer
+      - RequestBodyModel 
+      - RequestBodyModelId 
     Properties:
       RestApiId: !Ref Api
       StageName: !Sub '${StageName}'
@@ -153,4 +322,6 @@ Outputs:
   ApiRootUrl:
     Description: Root Url of the API
     Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
-    
+  AuthorizerLambdaArn:
+    Description: ARN of the Lambda function acting as the Authorizer.
+    Value: !GetAtt AuthorizerLambdaFunction.Arn
