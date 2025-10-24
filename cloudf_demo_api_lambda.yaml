@@ -51,7 +51,12 @@ Resources:
         ZipFile: |
           // Includes async handler ... full token validation logic.
           exports.handler = async (event) => {
-            
+            // Was this scheduled EVENT to keep lambda warm 
+            // If the event is from CloudWatch Events/EventBridge, no need for the main logic
+            if (event['source'] === 'aws.events' && event['detail-type'] === 'Scheduled Event') {
+                console.log("Heartbeat invocation detected. Exiting successfully.");
+                return; // Exit successfully
+            }
             const methodArn = event.methodArn;
             const EXPECTED_SECRET = "YOUR_SECRET_TOKEN"; // Bearer Token Secret change this to change Bearer Token
 
@@ -77,7 +82,7 @@ Resources:
             try {
               // token validation logic
               if (token === EXPECTED_SECRET) {
-                // ALLOW Policy
+                // Allow Policy
                 console.log("Authorization Succeeded.");
                 return { 
                   principalId: "user-id",
@@ -128,7 +133,7 @@ Resources:
         # This URI format is specific for Lambda Authorizers in the current region
         - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations'
         - LambdaArn: !GetAtt AuthorizerLambdaFunction.Arn
-      # Caching interval in seconds. Set to 0 to disable caching for debugging
+      # Caching interval in seconds. Set to 0 to disable caching
       AuthorizerResultTtlInSeconds: 0 
       # Relaxing the IdentityValidationExpression
       IdentityValidationExpression: '^Bearer .*' 
@@ -142,6 +147,29 @@ Resources:
       Principal: apigateway.amazonaws.com
       # SourceArn limits the permission to this specific REST API
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*"
+  # -------------------------------------------------------------------
+  # Availability objective have lambda function warm calling it every 10 mins
+  # -------------------------------------------------------------------
+  # invoke the AuthorizerLambdaFunction every 10 minutes
+  AuthorizerLambdaScheduleRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      # Use expression for 10-minute interval
+      ScheduleExpression: 'rate(10 minutes)'
+      Name: !Sub 'InvokeAuthorizerLambda-${StageName}'
+      State: 'ENABLED'
+      Targets:
+        - Arn: !GetAtt AuthorizerLambdaFunction.Arn
+          Id: 'InvokeTarget'
+
+  # Permission CloudWatch Event Rule invokes the Lambda function
+  AuthorizerLambdaSchedulePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref AuthorizerLambdaFunction
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt AuthorizerLambdaScheduleRule.Arn
 
   # -------------------------------------------------------------------
   # API Gateway Resources 
